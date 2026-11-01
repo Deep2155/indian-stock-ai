@@ -10,8 +10,56 @@ import plotly.graph_objects as go
 st.set_page_config(
     page_title="Indian Stock AI",
     page_icon="📈",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+# Modern Dashboard Styling
+st.markdown("""
+<style>
+    .stApp {
+        background-color: #0b1220;
+        color: #f1f5f9;
+    }
+
+    [data-testid="stSidebar"] {
+        background-color: #111c2f;
+        border-right: 1px solid #26354d;
+    }
+
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 2rem;
+        max-width: 1500px;
+    }
+
+    h1, h2, h3 {
+        color: #f8fafc !important;
+    }
+
+    [data-testid="stMetric"] {
+        background-color: #17243a;
+        border: 1px solid #26354d;
+        padding: 18px;
+        border-radius: 12px;
+    }
+
+    [data-testid="stMetricValue"] {
+        color: #38bdf8;
+    }
+
+    .stButton > button {
+        border-radius: 8px;
+        font-weight: 600;
+    }
+
+    [data-testid="stDataFrame"] {
+        border: 1px solid #26354d;
+        border-radius: 10px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 
 st.title("📈 Indian Stock AI Prediction")
 st.caption("Experimental stock analysis and machine learning dashboard")
