@@ -61,8 +61,27 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-st.title("📈 Indian Stock AI Prediction")
-st.caption("Experimental stock analysis and machine learning dashboard")
+# Main Dashboard Header
+header_col1, header_col2 = st.columns([3, 1])
+
+with header_col1:
+    st.markdown(
+        "<h1 style='margin-bottom:0;'>📈 Indian Stock AI</h1>",
+        unsafe_allow_html=True
+    )
+    st.caption("Your Intelligent Indian Stock Market Analysis Platform")
+
+with header_col2:
+    st.markdown(
+        "<div style='text-align:right; padding-top:15px;'>"
+        "<span style='background:#123d35; color:#4ade80; "
+        "padding:8px 14px; border-radius:20px; font-size:13px;'>"
+        "● AI SYSTEM READY</span></div>",
+        unsafe_allow_html=True
+    )
+
+st.divider()
+
 
 # Load trained model
 @st.cache_resource
