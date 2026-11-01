@@ -1,107 +1,96 @@
-import json
+ import json
+from pathlib import Path
 
+import joblib
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
-import pandas as pd
-import numpy as np
-import joblib
-import plotly.graph_objects as go
 
+# =========================================================
+# PAGE CONFIGURATION
+# =========================================================
 st.set_page_config(
     page_title="Indian Stock AI",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Modern Dashboard Styling
-st.markdown("""
-<style>
-    .stApp {
-        background-color: #0b1220;
-        color: #f1f5f9;
-    }
-
+# =========================================================
+# CUSTOM THEME
+# =========================================================
+st.markdown(
+    """
+    <style>
+    .stApp { background: #0b1220; color: #e5edf8; }
     [data-testid="stSidebar"] {
-        background-color: #111c2f;
+        background: #111c2f;
         border-right: 1px solid #26354d;
     }
-
     .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 2rem;
         max-width: 1500px;
+        padding-top: 1.3rem;
+        padding-bottom: 2rem;
     }
-
-    h1, h2, h3 {
-        color: #f8fafc !important;
-    }
-
+    h1, h2, h3, h4 { color: #f8fafc !important; }
     [data-testid="stMetric"] {
-        background-color: #17243a;
+        background: #17243a;
         border: 1px solid #26354d;
-        padding: 18px;
+        padding: 16px;
         border-radius: 12px;
     }
-
-    [data-testid="stMetricValue"] {
-        color: #38bdf8;
-    }
-
+    [data-testid="stMetricValue"] { color: #38bdf8; }
     .stButton > button {
         border-radius: 8px;
+        min-height: 2.6rem;
         font-weight: 600;
     }
-
     [data-testid="stDataFrame"] {
         border: 1px solid #26354d;
         border-radius: 10px;
     }
-</style>
-""", unsafe_allow_html=True)
+    .small-note { color: #9fb0c7; font-size: 0.88rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-
-# Main Dashboard Header
-header_col1, header_col2 = st.columns([3, 1])
-
-with header_col1:
-    st.markdown(
-        "<h1 style='margin-bottom:0;'>📈 Indian Stock AI</h1>",
-        unsafe_allow_html=True
-    )
-    st.caption("Your Intelligent Indian Stock Market Analysis Platform")
-
-with header_col2:
-    st.markdown(
-        "<div style='text-align:right; padding-top:15px;'>"
-        "<span style='background:#123d35; color:#4ade80; "
-        "padding:8px 14px; border-radius:20px; font-size:13px;'>"
-        "● AI SYSTEM READY</span></div>",
-        unsafe_allow_html=True
-    )
-
-st.divider()
-
-
-# Load trained model
+# =========================================================
+# MODEL AND COMMON FUNCTIONS
+# =========================================================
 @st.cache_resource
 def load_model():
-    return joblib.load("stock_ai_model.joblib")
-
-try:
-    package = load_model()
-    model = package["model"]
-    features = package["features"]
-except Exception as e:
-    st.error("AI model file not found. Run Step 36C first.")
-    st.stop()
+    model_path = Path(__file__).parent / "stock_ai_model.joblib"
+    package = joblib.load(model_path)
+    return package["model"], package["features"]
 
 
-# Technical indicators
+def download_history(symbol, period="5y", interval="1d"):
+    ticker = symbol.strip().upper()
+    if not ticker:
+        raise ValueError("Please enter an NSE stock symbol.")
+    if not ticker.startswith("^") and not ticker.endswith(".NS"):
+        ticker += ".NS"
+
+    data = yf.download(
+        ticker,
+        period=period,
+        interval=interval,
+        auto_adjust=True,
+        progress=False,
+        threads=False,
+    )
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    if data.empty:
+        raise ValueError(f"No data available for {ticker}. Check the symbol.")
+    return ticker, data
+
+
 def calculate_indicators(df):
-
     d = df.copy()
-
     d["EMA20"] = d["Close"].ewm(span=20, adjust=False).mean()
     d["EMA50"] = d["Close"].ewm(span=50, adjust=False).mean()
     d["EMA200"] = d["Close"].ewm(span=200, adjust=False).mean()
@@ -109,912 +98,725 @@ def calculate_indicators(df):
     delta = d["Close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-
+    avg_gain = gain.ewm(alpha=1 / 14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     d["RSI"] = 100 - (100 / (1 + rs))
 
     ema12 = d["Close"].ewm(span=12, adjust=False).mean()
     ema26 = d["Close"].ewm(span=26, adjust=False).mean()
-
     d["MACD"] = ema12 - ema26
     d["MACD_SIGNAL"] = d["MACD"].ewm(span=9, adjust=False).mean()
 
     previous_close = d["Close"].shift(1)
-
-    tr = pd.concat([
-        d["High"] - d["Low"],
-        abs(d["High"] - previous_close),
-        abs(d["Low"] - previous_close)
-    ], axis=1).max(axis=1)
-
-    d["ATR"] = tr.rolling(14).mean()
+    true_range = pd.concat(
+        [
+            d["High"] - d["Low"],
+            (d["High"] - previous_close).abs(),
+            (d["Low"] - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    d["ATR"] = true_range.rolling(14).mean()
 
     typical_price = (d["High"] + d["Low"] + d["Close"]) / 3
     volume_sum = d["Volume"].rolling(20).sum()
-
     d["VWAP_20"] = (
         (typical_price * d["Volume"]).rolling(20).sum()
         / volume_sum.replace(0, np.nan)
     )
 
-    d["Return_1D"] = d["Close"].pct_change(1)
-    d["Return_5D"] = d["Close"].pct_change(5)
-    d["Return_10D"] = d["Close"].pct_change(10)
-    d["Return_20D"] = d["Close"].pct_change(20)
+    for days in (1, 5, 10, 20):
+        d[f"Return_{days}D"] = d["Close"].pct_change(days)
 
     d["EMA20_Distance"] = d["Close"] / d["EMA20"] - 1
     d["EMA50_Distance"] = d["Close"] / d["EMA50"] - 1
     d["EMA200_Distance"] = d["Close"] / d["EMA200"] - 1
-
     d["MACD_Histogram"] = d["MACD"] - d["MACD_SIGNAL"]
     d["ATR_Percent"] = d["ATR"] / d["Close"]
     d["Volatility_20D"] = d["Return_1D"].rolling(20).std()
-
     d["Average_Volume_20"] = d["Volume"].rolling(20).mean()
-
     d["Volume_Ratio"] = (
         d["Volume"] / d["Average_Volume_20"].replace(0, np.nan)
     )
-
-    d["Above_VWAP"] = (
-        d["Close"] > d["VWAP_20"]
-    ).astype(float)
-
+    d["Above_VWAP"] = (d["Close"] > d["VWAP_20"]).astype(float)
     return d
 
 
-
-
-# AUTOMATIC CANDLESTICK PATTERN DETECTOR
 def detect_patterns(df):
-
     d = df.copy()
-
-    o = d["Open"]
-    h = d["High"]
-    l = d["Low"]
-    c = d["Close"]
-
+    o, h, low, c = d["Open"], d["High"], d["Low"], d["Close"]
     body = (c - o).abs()
-    candle_range = (h - l).replace(0, np.nan)
-
-    upper_shadow = h - pd.concat([o, c], axis=1).max(axis=1)
-    lower_shadow = pd.concat([o, c], axis=1).min(axis=1) - l
-
-    previous_open = o.shift(1)
-    previous_close = c.shift(1)
-
-    patterns = []
+    candle_range = (h - low).replace(0, np.nan)
+    upper = h - pd.concat([o, c], axis=1).max(axis=1)
+    lower = pd.concat([o, c], axis=1).min(axis=1) - low
+    prev_o, prev_c = o.shift(1), c.shift(1)
+    found_patterns = []
 
     for i in range(len(d)):
-
         found = []
-
         if pd.isna(candle_range.iloc[i]):
-            patterns.append("No pattern")
+            found_patterns.append("No pattern")
             continue
-
         current_body = body.iloc[i]
         current_range = candle_range.iloc[i]
 
-        # Doji
         if current_body <= current_range * 0.10:
             found.append("Doji")
-
-        # Hammer
         if (
-            lower_shadow.iloc[i] >= current_body * 2
-            and upper_shadow.iloc[i] <= current_body
+            lower.iloc[i] >= current_body * 2
+            and upper.iloc[i] <= current_body
             and current_body > 0
         ):
             found.append("Hammer")
-
-        # Shooting Star
         if (
-            upper_shadow.iloc[i] >= current_body * 2
-            and lower_shadow.iloc[i] <= current_body
+            upper.iloc[i] >= current_body * 2
+            and lower.iloc[i] <= current_body
             and current_body > 0
         ):
             found.append("Shooting Star")
-
         if i > 0:
-
-            # Bullish Engulfing
             if (
-                previous_close.iloc[i] < previous_open.iloc[i]
+                prev_c.iloc[i] < prev_o.iloc[i]
                 and c.iloc[i] > o.iloc[i]
-                and o.iloc[i] <= previous_close.iloc[i]
-                and c.iloc[i] >= previous_open.iloc[i]
+                and o.iloc[i] <= prev_c.iloc[i]
+                and c.iloc[i] >= prev_o.iloc[i]
             ):
                 found.append("Bullish Engulfing")
-
-            # Bearish Engulfing
             if (
-                previous_close.iloc[i] > previous_open.iloc[i]
+                prev_c.iloc[i] > prev_o.iloc[i]
                 and c.iloc[i] < o.iloc[i]
-                and o.iloc[i] >= previous_close.iloc[i]
-                and c.iloc[i] <= previous_open.iloc[i]
+                and o.iloc[i] >= prev_c.iloc[i]
+                and c.iloc[i] <= prev_o.iloc[i]
             ):
                 found.append("Bearish Engulfing")
+        found_patterns.append(", ".join(found) if found else "No pattern")
 
-        patterns.append(", ".join(found) if found else "No pattern")
-
-    d["Candlestick_Pattern"] = patterns
-
+    d["Candlestick_Pattern"] = found_patterns
     return d
 
 
+def get_prediction(data, model, features):
+    enriched = calculate_indicators(data)
+    latest_features = (
+        enriched[features]
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+        .tail(1)
+    )
+    if latest_features.empty:
+        raise ValueError("Latest technical indicators could not be calculated.")
+    prediction = model.predict(latest_features)[0]
+    probabilities = model.predict_proba(latest_features)[0]
+    return enriched, prediction, probabilities
 
-# Refresh market data
-refresh_col, refresh_info = st.columns([1, 2])
 
-with refresh_col:
-    if st.button("🔄 Refresh Market Data"):
-        st.cache_data.clear()
-        st.session_state["run_analysis"] = True
-        st.rerun()
-
-with refresh_info:
-    st.caption("Fetch the latest available data from Yahoo Finance.")
-
-
-# Stock search history
-if "stock_history" not in st.session_state:
-    try:
-        with open("stock_search_history.json", "r") as f:
-            st.session_state["stock_history"] = json.load(f)
-    except:
-        st.session_state["stock_history"] = []
-
-# Select stock from previous history
-if "stock_symbol_input" not in st.session_state:
-    st.session_state["stock_symbol_input"] = "RELIANCE"
-
-def select_history_stock():
-    selected = st.session_state["history_pick"]
-    if selected != "-- Select previous stock --":
-        st.session_state["stock_symbol_input"] = selected.replace(".NS", "")
-
-history_options = ["-- Select previous stock --"] + st.session_state.get("stock_history", [])
-
-st.selectbox(
-    "Select a previously analysed stock",
-    history_options,
-    key="history_pick",
-    on_change=select_history_stock
-)
-
-# User input
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    symbol = st.text_input(
-        "Enter NSE stock symbol",
-        key="stock_symbol_input"
-    ).strip().upper()
-
-with col2:
-    risk_level = st.selectbox(
-        "Risk level",
-        ["CONSERVATIVE", "MODERATE", "AGGRESSIVE"]
+def probability_table(model, probabilities):
+    return pd.DataFrame(
+        {
+            "Market Condition": model.classes_,
+            "Model Probability (%)": (probabilities * 100).round(2),
+        }
     )
 
 
-# Previously analysed stocks
-with st.expander("📚 Stock Search History", expanded=False):
-    history = st.session_state.get("stock_history", [])
-    if history:
-        for item in history:
-            st.write("•", item)
-    else:
-        st.caption("No stocks analysed yet.")
-
-analyse = st.button("ANALYSE STOCK", type="primary")
-
-if analyse or st.session_state.pop("run_analysis", False):
-
-    if not symbol:
-        st.warning("Please enter a stock symbol.")
-        st.stop()
-
-    ticker = symbol if symbol.endswith(".NS") else symbol + ".NS"
-
-    with st.spinner("Downloading stock data and analysing..."):
-
-        try:
-            df = yf.download(
-                ticker,
-                period="5y",
-                interval="1d",
-                auto_adjust=True,
-                progress=False
-            )
-
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            if df.empty or len(df) < 300:
-                st.error("Stock data unavailable or insufficient.")
-                st.stop()
-
-            if ticker not in st.session_state["stock_history"]:
-                st.session_state["stock_history"].insert(0, ticker)
-
-            with open("stock_search_history.json", "w") as f:
-                json.dump(st.session_state["stock_history"], f)
-
-            df = calculate_indicators(df)
-            df = detect_patterns(df)
-
-            latest_features = (
-                df[features]
-                .replace([np.inf, -np.inf], np.nan)
-                .dropna()
-                .tail(1)
-            )
-
-            if latest_features.empty:
-                st.error("Could not calculate latest indicators.")
-                st.stop()
-
-            prediction = model.predict(latest_features)[0]
-            probabilities = model.predict_proba(latest_features)[0]
-
-            latest = df.iloc[-1]
-
-            st.subheader(ticker + " — AI Analysis")
-
-            m1, m2, m3 = st.columns(3)
-
-            m1.metric(
-                "Latest Available Price",
-                f"₹{float(latest['Close']):,.2f}"
-            )
-
-            m2.metric("AI Prediction", prediction)
-
-            m3.metric(
-                "RSI",
-                f"{float(latest['RSI']):.2f}"
-            )
-
-            st.caption(
-                "Latest available market data: "
-                + str(df.index[-1].date())
-            )
-
-            st.subheader("Model Probabilities")
-
-            probability_df = pd.DataFrame({
-                "Market Condition": model.classes_,
-                "Probability (%)": (probabilities * 100).round(2)
-            })
-
-            st.dataframe(
-                probability_df,
-                use_container_width=True,
-                hide_index=True
-            )
-
-            st.subheader("Technical Indicators")
-
-            indicators = pd.DataFrame({
-                "Indicator": [
-                    "EMA 20", "EMA 50", "EMA 200",
-                    "MACD", "ATR", "20-Day Rolling VWAP"
-                ],
-                "Value": [
-                    round(float(latest["EMA20"]), 2),
-                    round(float(latest["EMA50"]), 2),
-                    round(float(latest["EMA200"]), 2),
-                    round(float(latest["MACD"]), 2),
-                    round(float(latest["ATR"]), 2),
-                    round(float(latest["VWAP_20"]), 2)
-                ]
-            })
-
-            st.dataframe(
-                indicators,
-                use_container_width=True,
-                hide_index=True
-            )
-
-            # CANDLESTICK PATTERN RESULTS
-            st.subheader("Automatic Candlestick Pattern Recognition")
-
-            recent_patterns = df[
-                df["Candlestick_Pattern"] != "No pattern"
-            ][["Close", "Candlestick_Pattern"]].tail(10)
-
-            if recent_patterns.empty:
-                st.info("No recognised candlestick patterns in recent data.")
-            else:
-                st.dataframe(
-                    recent_patterns.sort_index(ascending=False),
-                    use_container_width=True
-                )
-
-            # Illustrative ATR levels
-            settings = {
-                "CONSERVATIVE": (1.0, 1.5),
-                "MODERATE": (1.5, 2.5),
-                "AGGRESSIVE": (2.0, 3.5)
-            }
-
-            stop_multiple, target_multiple = settings[risk_level]
-
-            price = float(latest["Close"])
-            atr = float(latest["ATR"])
-
-            if prediction == "BULLISH":
-                stop = price - stop_multiple * atr
-                target = price + target_multiple * atr
-
-            elif prediction == "BEARISH":
-                stop = price + stop_multiple * atr
-                target = price - target_multiple * atr
-
-            else:
-                stop = None
-                target = None
-
-            st.subheader("Illustrative Target & Stop Loss")
-
-            if target is not None:
-                a, b = st.columns(2)
-                a.metric("Illustrative Target", f"₹{target:,.2f}")
-                b.metric("Illustrative Stop Loss", f"₹{stop:,.2f}")
-            else:
-                st.info("Sideways prediction: no directional levels suggested.")
-
-            # Candlestick chart
-            chart = df.tail(180)
-
-            fig = go.Figure()
-
-            fig.add_trace(go.Candlestick(
-                x=chart.index,
-                open=chart["Open"],
-                high=chart["High"],
-                low=chart["Low"],
-                close=chart["Close"],
-                name="Price"
-            ))
-
-            for column in ["EMA20", "EMA50", "EMA200"]:
-                fig.add_trace(go.Scatter(
+def show_candlestick_chart(df, title, rows=180):
+    chart = df.tail(rows)
+    fig = go.Figure()
+    fig.add_trace(
+        go.Candlestick(
+            x=chart.index,
+            open=chart["Open"],
+            high=chart["High"],
+            low=chart["Low"],
+            close=chart["Close"],
+            name="Price",
+        )
+    )
+    for column in ("EMA20", "EMA50", "EMA200"):
+        if column in chart:
+            fig.add_trace(
+                go.Scatter(
                     x=chart.index,
                     y=chart[column],
                     mode="lines",
-                    name=column
-                ))
-
-            fig.update_layout(
-                title=ticker + " — Candlestick Chart",
-                height=650,
-                xaxis_rangeslider_visible=False
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.warning(
-                "Research prototype only. Model probabilities are not "
-                "guaranteed chances of profit. This is not live NSE data "
-                "or a recommendation to trade."
-            )
-
-        except Exception as e:
-            st.error("Analysis failed: " + str(e))
-
-
-
-# =====================================
-# MULTI STOCK AI COMPARISON
-# =====================================
-
-st.divider()
-st.header("📊 Multi-Stock AI Comparison")
-
-comparison_symbols = st.text_input(
-    "Enter stocks separated by commas",
-    value="RELIANCE,TCS,INFY",
-    key="comparison_symbols"
-)
-
-if st.button("COMPARE STOCKS", type="primary"):
-
-    symbols_list = [
-        x.strip().upper()
-        for x in comparison_symbols.split(",")
-        if x.strip()
-    ]
-
-    if not symbols_list:
-        st.warning("Please enter stock symbols.")
-    elif len(symbols_list) > 5:
-        st.warning("Please compare maximum 5 stocks at a time.")
-    else:
-
-        comparison_results = []
-
-        for stock in symbols_list:
-
-            ticker = stock if stock.endswith(".NS") else stock + ".NS"
-
-            try:
-                with st.spinner(f"Analysing {ticker}..."):
-
-                    data = yf.download(
-                        ticker,
-                        period="5y",
-                        interval="1d",
-                        auto_adjust=True,
-                        progress=False
-                    )
-
-                    if isinstance(data.columns, pd.MultiIndex):
-                        data.columns = data.columns.get_level_values(0)
-
-                    if data.empty or len(data) < 300:
-                        st.warning(f"Insufficient data for {ticker}")
-                        continue
-
-                    data = calculate_indicators(data)
-
-                    latest_features = (
-                        data[features]
-                        .replace([np.inf, -np.inf], np.nan)
-                        .dropna()
-                        .tail(1)
-                    )
-
-                    if latest_features.empty:
-                        st.warning(f"Indicators unavailable for {ticker}")
-                        continue
-
-                    prediction = model.predict(latest_features)[0]
-                    probabilities = model.predict_proba(latest_features)[0]
-
-                    probability_map = dict(
-                        zip(model.classes_, probabilities)
-                    )
-
-                    latest = data.iloc[-1]
-
-                    comparison_results.append({
-                        "Stock": stock,
-                        "Price": round(float(latest["Close"]), 2),
-                        "AI Prediction": str(prediction),
-                        "Model Confidence (%)": round(
-                            float(max(probabilities)) * 100, 2
-                        ),
-                        "Bullish (%)": round(
-                            float(probability_map.get("BULLISH", 0)) * 100, 2
-                        ),
-                        "Bearish (%)": round(
-                            float(probability_map.get("BEARISH", 0)) * 100, 2
-                        ),
-                        "Sideways (%)": round(
-                            float(probability_map.get("SIDEWAYS", 0)) * 100, 2
-                        ),
-                        "RSI": round(float(latest["RSI"]), 2),
-                        "MACD": round(float(latest["MACD"]), 2)
-                    })
-
-            except Exception as e:
-                st.warning(f"{ticker}: Analysis failed - {e}")
-
-        if comparison_results:
-
-            comparison_df = pd.DataFrame(comparison_results)
-
-            st.subheader("Comparison Results")
-            st.dataframe(
-                comparison_df,
-                use_container_width=True,
-                hide_index=True
-            )
-
-            csv_report = comparison_df.to_csv(index=False).encode("utf-8")
-
-            st.download_button(
-                label="📥 Download Comparison Report",
-                data=csv_report,
-                file_name="stock_ai_comparison.csv",
-                mime="text/csv"
-            )
-
-            st.caption(
-                "Model confidence is not a guaranteed probability of profit. "
-                "Predictions are experimental and based on historical data."
-            )
-
-
-
-
-# =====================================
-# MULTI STOCK PERFORMANCE COMPARISON
-# =====================================
-
-st.divider()
-st.header("📈 Stock Performance Comparison")
-
-if st.button("SHOW 1-YEAR PERFORMANCE CHART"):
-
-    symbols = [
-        x.strip().upper()
-        for x in comparison_symbols.split(",")
-        if x.strip()
-    ]
-
-    performance_chart = go.Figure()
-
-    for stock in symbols[:5]:
-
-        ticker = stock if stock.endswith(".NS") else stock + ".NS"
-
-        try:
-            history_data = yf.download(
-                ticker,
-                period="1y",
-                interval="1d",
-                auto_adjust=True,
-                progress=False
-            )
-
-            if isinstance(history_data.columns, pd.MultiIndex):
-                history_data.columns = history_data.columns.get_level_values(0)
-
-            if history_data.empty:
-                st.warning(f"Data unavailable for {ticker}")
-                continue
-
-            close = history_data["Close"].dropna()
-
-            if len(close) < 2:
-                continue
-
-            normalized = (close / close.iloc[0]) * 100
-
-            performance_chart.add_trace(
-                go.Scatter(
-                    x=normalized.index,
-                    y=normalized,
-                    mode="lines",
-                    name=stock
+                    name=column,
                 )
             )
-
-        except Exception as e:
-            st.warning(f"{ticker}: {e}")
-
-    if performance_chart.data:
-
-        performance_chart.update_layout(
-            title="1-Year Relative Stock Performance",
-            xaxis_title="Date",
-            yaxis_title="Growth Index (Starting Value = 100)",
-            hovermode="x unified",
-            template="plotly_white"
-        )
-
-        st.plotly_chart(
-            performance_chart,
-            use_container_width=True
-        )
-
-        st.caption(
-            "Historical relative performance only. "
-            "Starting value is normalized to 100; this is not a future return forecast."
-        )
+    fig.update_layout(
+        title=title,
+        height=560,
+        template="plotly_dark",
+        paper_bgcolor="#111c2f",
+        plot_bgcolor="#111c2f",
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=20, r=20, t=55, b=20),
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
+def format_market_cap(value):
+    if not isinstance(value, (int, float)) or pd.isna(value):
+        return "Not available"
+    if value >= 1e7:
+        return f"₹{value / 1e7:,.2f} Cr"
+    return f"₹{value:,.0f}"
 
-# NIFTY and BANK NIFTY AI Market Overview
+
+# =========================================================
+# SIDEBAR AND APP HEADER
+# =========================================================
+with st.sidebar:
+    st.markdown("## 📈 INDIAN STOCK AI")
+    st.caption("Personal Market Assistant")
+    st.divider()
+    page = st.radio(
+        "NAVIGATION",
+        [
+            "Dashboard",
+            "AI Stock Analysis",
+            "Market Overview",
+            "Stock Comparison",
+            "Fundamentals",
+            "Quarterly Results",
+            "Historical Data",
+            "Price Alerts",
+        ],
+        label_visibility="visible",
+    )
+    st.divider()
+    if st.button("🔄 Refresh data", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+    st.caption("Data source: Yahoo Finance")
+    st.caption("Data may be delayed or incomplete.")
+
+header_left, header_right = st.columns([3, 1])
+with header_left:
+    st.markdown(
+        "<h1 style='margin-bottom:0;'>📈 Indian Stock AI</h1>",
+        unsafe_allow_html=True,
+    )
+    st.caption("Your Intelligent Indian Stock Market Analysis Platform")
+with header_right:
+    st.markdown(
+        "<div style='text-align:right;padding-top:15px;'>"
+        "<span style='background:#123d35;color:#4ade80;padding:8px 14px;"
+        "border-radius:20px;font-size:13px;'>● AI SYSTEM READY</span></div>",
+        unsafe_allow_html=True,
+    )
 st.divider()
-st.header("🇮🇳 Indian Market Overview")
 
-if st.button("🔍 ANALYSE NIFTY & BANK NIFTY"):
-    index_list = {
-        "NIFTY 50": "^NSEI",
-        "BANK NIFTY": "^NSEBANK"
-    }
+try:
+    model, features = load_model()
+except Exception as exc:
+    st.error(
+        "AI model could not be loaded. Confirm that "
+        "`stock_ai_model.joblib` is in the same GitHub folder as `app.py`."
+    )
+    st.exception(exc)
+    st.stop()
 
-    overview_results = []
+# =========================================================
+# PAGE: DASHBOARD
+# =========================================================
+if page == "Dashboard":
+    st.subheader("Market Dashboard")
+    st.write("Quick access to your stock research tools.")
 
-    for index_name, index_symbol in index_list.items():
-        try:
-            index_data = yf.download(
-                index_symbol,
-                period="5y",
-                interval="1d",
-                auto_adjust=True,
-                progress=False
-            )
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Analysis Engine", "Ready")
+    c2.metric("Model", "Loaded")
+    c3.metric("Market Data", "Yahoo Finance")
 
-            if isinstance(index_data.columns, pd.MultiIndex):
-                index_data.columns = index_data.columns.get_level_values(0)
-
-            index_data = calculate_indicators(index_data)
-            latest_row = index_data.dropna(subset=features).tail(1)
-
-            if latest_row.empty:
-                continue
-
-            latest_features = latest_row[features]
-            prediction = model.predict(latest_features)[0]
-            probabilities = model.predict_proba(latest_features)[0]
-            confidence = max(probabilities) * 100
-
-            overview_results.append({
-                "Index": index_name,
-                "Latest Close": round(float(latest_row["Close"].iloc[0]), 2),
-                "AI Trend": str(prediction),
-                "Model Confidence": f"{confidence:.2f}%"
-            })
-
-        except Exception as e:
-            st.warning(f"{index_name}: Data unavailable - {e}")
-
-    if overview_results:
-        st.dataframe(
-            pd.DataFrame(overview_results),
-            use_container_width=True,
-            hide_index=True
-        )
-    else:
-        st.error("Market overview could not be generated.")
-
-
-# Company Fundamentals and Shareholding
-st.divider()
-st.header("🏢 Company Fundamentals & Shareholding")
-
-fundamental_symbol = st.text_input(
-    "Enter NSE company symbol",
-    value="RELIANCE",
-    key="fundamental_symbol"
-).strip().upper()
-
-if st.button("📊 GET COMPANY FUNDAMENTALS"):
-    try:
-        company_ticker = yf.Ticker(fundamental_symbol + ".NS")
-        company_info = company_ticker.info
-
-        st.subheader(company_info.get("longName", fundamental_symbol))
-
-        details = {
-            "Sector": company_info.get("sector", "Not available"),
-            "Industry": company_info.get("industry", "Not available"),
-            "Market Cap": company_info.get("marketCap", "Not available"),
-            "P/E Ratio": company_info.get("trailingPE", "Not available"),
-            "Price to Book": company_info.get("priceToBook", "Not available"),
-            "Dividend Yield": company_info.get("dividendYield", "Not available"),
-            "52 Week High": company_info.get("fiftyTwoWeekHigh", "Not available"),
-            "52 Week Low": company_info.get("fiftyTwoWeekLow", "Not available")
-        }
-
-        st.subheader("Company Details")
-        st.dataframe(
-            pd.DataFrame(details.items(), columns=["Particulars", "Value"]),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.subheader("Annual Financial Results")
-        annual_results = company_ticker.financials
-
-        if annual_results is not None and not annual_results.empty:
-            st.dataframe(annual_results.T.head(5), use_container_width=True)
-        else:
-            st.info("Annual financial results are not available.")
-
-        st.subheader("Major Shareholders")
-        major_holders = company_ticker.major_holders
-
-        if major_holders is not None and not major_holders.empty:
-            st.dataframe(major_holders, use_container_width=True)
-        else:
-            st.info("Major shareholder data is not available.")
-
-        st.subheader("Institutional Shareholders")
-        institutional_holders = company_ticker.institutional_holders
-
-        if institutional_holders is not None and not institutional_holders.empty:
-            st.dataframe(institutional_holders, use_container_width=True)
-        else:
-            st.info("Institutional shareholder data is not available.")
-
-        st.caption(
-            "Source: Yahoo Finance. Data may be delayed, incomplete or unavailable. "
-            "Verify financial information from official NSE/BSE filings before investing."
-        )
-
-    except Exception as e:
-        st.error(f"Could not fetch company data: {e}")
-
-
-# Quarterly Financial Results
-st.divider()
-st.header("📅 Quarterly Financial Results")
-
-quarterly_symbol = st.text_input(
-    "Enter NSE symbol for quarterly results",
-    value="RELIANCE",
-    key="quarterly_symbol"
-).strip().upper()
-
-if st.button("GET QUARTERLY RESULTS"):
-    try:
-        quarterly_ticker = yf.Ticker(quarterly_symbol + ".NS")
-
-        quarterly_income = quarterly_ticker.quarterly_income_stmt
-
-        if quarterly_income is not None and not quarterly_income.empty:
-            st.subheader("Quarterly Income Statement")
-            st.dataframe(
-                quarterly_income.T.head(8),
-                use_container_width=True
-            )
-        else:
-            st.info("Quarterly income statement unavailable.")
-
-        quarterly_balance = quarterly_ticker.quarterly_balance_sheet
-
-        if quarterly_balance is not None and not quarterly_balance.empty:
-            st.subheader("Quarterly Balance Sheet")
-            st.dataframe(
-                quarterly_balance.T.head(8),
-                use_container_width=True
-            )
-        else:
-            st.info("Quarterly balance sheet unavailable.")
-
-        quarterly_cashflow = quarterly_ticker.quarterly_cashflow
-
-        if quarterly_cashflow is not None and not quarterly_cashflow.empty:
-            st.subheader("Quarterly Cash Flow")
-            st.dataframe(
-                quarterly_cashflow.T.head(8),
-                use_container_width=True
-            )
-        else:
-            st.info("Quarterly cash flow unavailable.")
-
-    except Exception as e:
-        st.error(f"Quarterly data error: {e}")
-
-    st.caption("Source: Yahoo Finance. Quarterly data may be incomplete or delayed.")
-
-
-# Historical Stock Data Download
-st.divider()
-st.header("📥 Download Historical Stock Data")
-
-download_symbol = st.text_input(
-    "Enter NSE stock symbol",
-    value="RELIANCE",
-    key="historical_download_symbol"
-).strip().upper()
-
-download_period = st.selectbox(
-    "Select historical period",
-    ["1y", "2y", "5y", "10y"],
-    index=2,
-    key="historical_download_period"
-)
-
-if st.button("GET HISTORICAL DATA"):
-    try:
-        historical_data = yf.download(
-            download_symbol + ".NS",
-            period=download_period,
-            interval="1d",
-            auto_adjust=True,
-            progress=False
-        )
-
-        if isinstance(historical_data.columns, pd.MultiIndex):
-            historical_data.columns = historical_data.columns.get_level_values(0)
-
-        historical_data = historical_data.reset_index()
-
-        if not historical_data.empty:
-            st.success(
-                f"Downloaded {len(historical_data)} daily records for {download_symbol}."
-            )
-
-            st.dataframe(
-                historical_data.tail(20),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            historical_csv = historical_data.to_csv(index=False).encode("utf-8")
-
-            st.download_button(
-                "📥 Download Historical Data CSV",
-                data=historical_csv,
-                file_name=f"{download_symbol}_{download_period}_history.csv",
-                mime="text/csv"
-            )
-        else:
-            st.warning("No historical data found. Check the NSE symbol.")
-
-    except Exception as e:
-        st.error(f"Historical data error: {e}")
-
-    st.caption(
-        "Source: Yahoo Finance. Historical data availability and accuracy may vary."
+    st.info(
+        "Choose a section from the sidebar to analyse a stock, view market "
+        "indices, compare shares, review company financials or check a price level."
     )
 
+    st.subheader("Quick Stock Analysis")
+    quick_symbol = st.text_input(
+        "NSE stock symbol",
+        value="RELIANCE",
+        key="dashboard_symbol",
+    ).strip().upper()
+    if st.button("Analyse this stock", type="primary"):
+        st.session_state["quick_stock_symbol"] = quick_symbol
+        st.session_state["navigate_to_analysis"] = True
+        st.rerun()
 
-# Stock Price Alert System
-st.divider()
-st.header("🔔 Stock Price Alert System")
+    st.subheader("Important")
+    st.warning(
+        "This is an experimental research tool. Model probabilities are not "
+        "calibrated guarantees or chances of profit. Data is not a live NSE feed. "
+        "Verify prices and information with your broker and official filings."
+    )
 
-alert_symbol = st.text_input(
-    "NSE Stock Symbol",
-    value="RELIANCE",
-    key="alert_symbol"
-).strip().upper()
+# =========================================================
+# PAGE: AI STOCK ANALYSIS
+# =========================================================
+elif page == "AI Stock Analysis":
+    st.subheader("🔍 AI Stock Analysis")
+    history_file = Path(__file__).parent / "stock_search_history.json"
+    if "stock_history" not in st.session_state:
+        try:
+            st.session_state.stock_history = json.loads(
+                history_file.read_text(encoding="utf-8")
+            )
+        except Exception:
+            st.session_state.stock_history = []
 
-alert_target = st.number_input(
-    "Target Price (₹)",
-    min_value=0.0,
-    value=1600.0,
-    step=10.0,
-    key="alert_target"
-)
+    previous = ["-- Select previous stock --"] + st.session_state.stock_history
+    picked = st.selectbox("Previously analysed stocks", previous)
+    default_symbol = st.session_state.pop(
+        "quick_stock_symbol",
+        picked.replace(".NS", "") if picked != previous[0] else "RELIANCE",
+    )
+    symbol = st.text_input(
+        "Enter NSE stock symbol",
+        value=default_symbol,
+        key="analysis_symbol",
+    ).strip().upper()
+    risk_level = st.selectbox(
+        "Risk level",
+        ["CONSERVATIVE", "MODERATE", "AGGRESSIVE"],
+    )
 
-alert_stoploss = st.number_input(
-    "Stop Loss Price (₹)",
-    min_value=0.0,
-    value=1300.0,
-    step=10.0,
-    key="alert_stoploss"
-)
+    if st.button("ANALYSE STOCK", type="primary"):
+        try:
+            with st.spinner("Downloading historical data and analysing..."):
+                ticker, raw = download_history(symbol, "5y")
+                if len(raw) < 300:
+                    st.error("Insufficient historical data for this analysis.")
+                    st.stop()
 
-if st.button("CHECK PRICE ALERT"):
-    try:
-        alert_data = yf.download(
-            alert_symbol + ".NS",
-            period="5d",
-            interval="1d",
-            auto_adjust=True,
-            progress=False
+                enriched, prediction, probabilities = get_prediction(
+                    raw, model, features
+                )
+                enriched = detect_patterns(enriched)
+                latest = enriched.iloc[-1]
+
+                if ticker not in st.session_state.stock_history:
+                    st.session_state.stock_history.insert(0, ticker)
+                    st.session_state.stock_history = (
+                        st.session_state.stock_history[:30]
+                    )
+                    history_file.write_text(
+                        json.dumps(st.session_state.stock_history, indent=2),
+                        encoding="utf-8",
+                    )
+
+                st.session_state["last_analysis"] = {
+                    "ticker": ticker,
+                    "data": enriched,
+                    "prediction": str(prediction),
+                    "probabilities": probabilities,
+                    "risk_level": risk_level,
+                }
+        except Exception as exc:
+            st.error(f"Analysis failed: {exc}")
+
+    result = st.session_state.get("last_analysis")
+    if result:
+        ticker = result["ticker"]
+        enriched = result["data"]
+        prediction = result["prediction"]
+        probabilities = result["probabilities"]
+        latest = enriched.iloc[-1]
+
+        st.markdown(f"### {ticker} — AI Analysis")
+        a, b, c = st.columns(3)
+        a.metric("Latest Available Price", f"₹{float(latest['Close']):,.2f}")
+        b.metric("AI Prediction", prediction)
+        b.caption("Experimental model output")
+        c.metric("RSI", f"{float(latest['RSI']):.2f}")
+        st.caption(f"Latest available daily data: {enriched.index[-1].date()}")
+
+        st.subheader("Model Probabilities")
+        st.dataframe(
+            probability_table(model, probabilities),
+            use_container_width=True,
+            hide_index=True,
         )
 
-        if isinstance(alert_data.columns, pd.MultiIndex):
-            alert_data.columns = alert_data.columns.get_level_values(0)
+        st.subheader("Technical Indicators")
+        indicator_rows = [
+            ("EMA 20", "EMA20"),
+            ("EMA 50", "EMA50"),
+            ("EMA 200", "EMA200"),
+            ("MACD", "MACD"),
+            ("ATR", "ATR"),
+            ("20-Day Rolling VWAP", "VWAP_20"),
+        ]
+        indicators = pd.DataFrame(
+            {
+                "Indicator": [name for name, _ in indicator_rows],
+                "Value": [
+                    round(float(latest[key]), 2) for _, key in indicator_rows
+                ],
+            }
+        )
+        st.dataframe(indicators, use_container_width=True, hide_index=True)
 
-        if not alert_data.empty:
-            current_price = float(alert_data["Close"].dropna().iloc[-1])
+        st.subheader("Automatic Candlestick Pattern Recognition")
+        recent = enriched[
+            enriched["Candlestick_Pattern"] != "No pattern"
+        ][["Close", "Candlestick_Pattern"]].tail(10)
+        if recent.empty:
+            st.info("No recognised candlestick patterns in the available recent data.")
+        else:
+            st.dataframe(
+                recent.sort_index(ascending=False),
+                use_container_width=True,
+            )
 
-            st.metric("Latest Available Closing Price", f"₹{current_price:.2f}")
+        risk_settings = {
+            "CONSERVATIVE": (1.0, 1.5),
+            "MODERATE": (1.5, 2.5),
+            "AGGRESSIVE": (2.0, 3.5),
+        }
+        stop_mult, target_mult = risk_settings[result["risk_level"]]
+        price = float(latest["Close"])
+        atr = float(latest["ATR"])
+        st.subheader("Illustrative Target & Stop Loss")
+        if prediction == "BULLISH":
+            stop, target = price - stop_mult * atr, price + target_mult * atr
+        elif prediction == "BEARISH":
+            stop, target = price + stop_mult * atr, price - target_mult * atr
+        else:
+            stop, target = None, None
 
-            if alert_target > 0 and current_price >= alert_target:
-                st.success("🎯 TARGET PRICE REACHED!")
+        if target is not None:
+            x, y = st.columns(2)
+            x.metric("Illustrative Target", f"₹{target:,.2f}")
+            y.metric("Illustrative Stop Loss", f"₹{stop:,.2f}")
+        else:
+            st.info("Sideways prediction: no directional levels suggested.")
 
-            if alert_stoploss > 0 and current_price <= alert_stoploss:
-                st.error("⚠️ STOP-LOSS LEVEL REACHED!")
+        show_candlestick_chart(enriched, f"{ticker} — Candlestick Chart")
+        st.warning(
+            "Research prototype only. Model probabilities are not guaranteed "
+            "chances of profit. This is not live NSE data or a recommendation to trade."
+        )
 
-            if (
-                alert_target > 0
-                and alert_stoploss > 0
-                and alert_stoploss < current_price < alert_target
-            ):
-                st.info("Price is between your target and stop-loss levels.")
+    with st.expander("Stock Search History"):
+        if st.session_state.stock_history:
+            st.write(st.session_state.stock_history)
+        else:
+            st.caption("No stocks analysed yet.")
 
-            st.caption(
-                "This is a manual price check using the latest available daily data, "
-                "not a continuous live alert. Verify prices with your broker."
+# =========================================================
+# PAGE: MARKET OVERVIEW
+# =========================================================
+elif page == "Market Overview":
+    st.subheader("🇮🇳 Indian Market Overview")
+    st.caption("AI overview of NIFTY 50 and BANK NIFTY using available Yahoo Finance data.")
+    if st.button("ANALYSE NIFTY & BANK NIFTY", type="primary"):
+        index_list = {"NIFTY 50": "^NSEI", "BANK NIFTY": "^NSEBANK"}
+        results = []
+        for name, symbol in index_list.items():
+            try:
+                with st.spinner(f"Analysing {name}..."):
+                    _, raw = download_history(symbol, "5y")
+                    enriched, prediction, probabilities = get_prediction(
+                        raw, model, features
+                    )
+                    latest = enriched.dropna(subset=features).iloc[-1]
+                    results.append(
+                        {
+                            "Index": name,
+                            "Latest Close": round(float(latest["Close"]), 2),
+                            "AI Trend": str(prediction),
+                            "Model Probability (%)": round(
+                                float(np.max(probabilities)) * 100, 2
+                            ),
+                            "RSI": round(float(latest["RSI"]), 2),
+                        }
+                    )
+            except Exception as exc:
+                st.warning(f"{name}: {exc}")
+        if results:
+            st.dataframe(
+                pd.DataFrame(results),
+                use_container_width=True,
+                hide_index=True,
             )
         else:
-            st.warning("Stock data unavailable. Check the NSE symbol.")
+            st.error("Market overview could not be generated.")
 
-    except Exception as e:
-        st.error(f"Price alert error: {e}")
+# =========================================================
+# PAGE: STOCK COMPARISON
+# =========================================================
+elif page == "Stock Comparison":
+    st.subheader("📊 Multi-Stock AI Comparison")
+    symbols_text = st.text_input(
+        "Enter up to 5 NSE stocks separated by commas",
+        value="RELIANCE,TCS,INFY",
+        key="compare_symbols",
+    )
+    if st.button("COMPARE STOCKS", type="primary"):
+        symbols = [x.strip().upper() for x in symbols_text.split(",") if x.strip()]
+        if not symbols:
+            st.warning("Enter at least one stock symbol.")
+        elif len(symbols) > 5:
+            st.warning("Maximum 5 stocks can be compared at a time.")
+        else:
+            results = []
+            for stock in symbols:
+                try:
+                    with st.spinner(f"Analysing {stock}..."):
+                        _, raw = download_history(stock, "5y")
+                        enriched, prediction, probabilities = get_prediction(
+                            raw, model, features
+                        )
+                        latest = enriched.dropna(subset=features).iloc[-1]
+                        probability_map = dict(zip(model.classes_, probabilities))
+                        results.append(
+                            {
+                                "Stock": stock,
+                                "Price (₹)": round(float(latest["Close"]), 2),
+                                "AI Prediction": str(prediction),
+                                "Model Confidence (%)": round(
+                                    float(max(probabilities)) * 100, 2
+                                ),
+                                "Bullish (%)": round(
+                                    float(probability_map.get("BULLISH", 0)) * 100, 2
+                                ),
+                                "Bearish (%)": round(
+                                    float(probability_map.get("BEARISH", 0)) * 100, 2
+                                ),
+                                "Sideways (%)": round(
+                                    float(probability_map.get("SIDEWAYS", 0)) * 100, 2
+                                ),
+                                "RSI": round(float(latest["RSI"]), 2),
+                                "MACD": round(float(latest["MACD"]), 2),
+                            }
+                        )
+                except Exception as exc:
+                    st.warning(f"{stock}: {exc}")
+
+            if results:
+                comparison = pd.DataFrame(results)
+                st.session_state["comparison_results"] = comparison
+            else:
+                st.session_state.pop("comparison_results", None)
+
+    comparison = st.session_state.get("comparison_results")
+    if comparison is not None:
+        st.subheader("Comparison Results")
+        st.dataframe(comparison, use_container_width=True, hide_index=True)
+        st.download_button(
+            "📥 Download Comparison Report",
+            data=comparison.to_csv(index=False).encode("utf-8"),
+            file_name="stock_ai_comparison.csv",
+            mime="text/csv",
+        )
+        st.caption(
+            "Model confidence is not a guaranteed probability of profit. "
+            "Predictions are experimental and based on historical data."
+        )
+
+    st.divider()
+    st.subheader("📈 Relative Stock Performance")
+    if st.button("SHOW 1-YEAR PERFORMANCE CHART"):
+        symbols = [x.strip().upper() for x in symbols_text.split(",") if x.strip()]
+        fig = go.Figure()
+        for stock in symbols[:5]:
+            try:
+                _, hist = download_history(stock, "1y")
+                close = hist["Close"].dropna()
+                if len(close) > 1:
+                    normalized = close / close.iloc[0] * 100
+                    fig.add_trace(
+                        go.Scatter(
+                            x=normalized.index,
+                            y=normalized,
+                            mode="lines",
+                            name=stock,
+                        )
+                    )
+            except Exception as exc:
+                st.warning(f"{stock}: {exc}")
+        if fig.data:
+            fig.update_layout(
+                title="1-Year Relative Stock Performance",
+                xaxis_title="Date",
+                yaxis_title="Growth Index (Starting Value = 100)",
+                hovermode="x unified",
+                template="plotly_dark",
+                paper_bgcolor="#111c2f",
+                plot_bgcolor="#111c2f",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(
+                "Historical relative performance only. Starting value is "
+                "normalised to 100; this is not a future return forecast."
+            )
+        else:
+            st.info("No performance data could be plotted.")
+
+# =========================================================
+# PAGE: FUNDAMENTALS
+# =========================================================
+elif page == "Fundamentals":
+    st.subheader("🏢 Company Fundamentals & Shareholding")
+    symbol = st.text_input(
+        "Enter NSE company symbol",
+        value="RELIANCE",
+        key="fundamentals_symbol",
+    ).strip().upper()
+    if st.button("GET COMPANY FUNDAMENTALS", type="primary"):
+        try:
+            company = yf.Ticker(symbol if symbol.endswith(".NS") else symbol + ".NS")
+            info = company.info
+            st.markdown(f"### {info.get('longName', symbol)}")
+            details = {
+                "Sector": info.get("sector", "Not available"),
+                "Industry": info.get("industry", "Not available"),
+                "Market Cap": format_market_cap(info.get("marketCap")),
+                "P/E Ratio": info.get("trailingPE", "Not available"),
+                "Price to Book": info.get("priceToBook", "Not available"),
+                "Dividend Yield": info.get("dividendYield", "Not available"),
+                "52 Week High": info.get("fiftyTwoWeekHigh", "Not available"),
+                "52 Week Low": info.get("fiftyTwoWeekLow", "Not available"),
+            }
+            st.subheader("Company Details")
+            st.dataframe(
+                pd.DataFrame(details.items(), columns=["Particulars", "Value"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+            annual = company.financials
+            st.subheader("Annual Financial Results")
+            if annual is not None and not annual.empty:
+                st.dataframe(annual.T.head(5), use_container_width=True)
+            else:
+                st.info("Annual financial results are not available.")
+            for title, attr in [
+                ("Major Shareholders", "major_holders"),
+                ("Institutional Shareholders", "institutional_holders"),
+            ]:
+                st.subheader(title)
+                holders = getattr(company, attr)
+                if holders is not None and not holders.empty:
+                    st.dataframe(holders, use_container_width=True)
+                else:
+                    st.info(f"{title} data is not available.")
+            st.caption(
+                "Source: Yahoo Finance. Data may be delayed, incomplete or unavailable. "
+                "Verify financial information from official NSE/BSE filings."
+            )
+        except Exception as exc:
+            st.error(f"Could not fetch company data: {exc}")
+
+# =========================================================
+# PAGE: QUARTERLY RESULTS
+# =========================================================
+elif page == "Quarterly Results":
+    st.subheader("📅 Quarterly Financial Results")
+    symbol = st.text_input(
+        "Enter NSE symbol",
+        value="RELIANCE",
+        key="quarterly_symbol",
+    ).strip().upper()
+    if st.button("GET QUARTERLY RESULTS", type="primary"):
+        try:
+            company = yf.Ticker(symbol if symbol.endswith(".NS") else symbol + ".NS")
+            for title, attr in [
+                ("Quarterly Income Statement", "quarterly_income_stmt"),
+                ("Quarterly Balance Sheet", "quarterly_balance_sheet"),
+                ("Quarterly Cash Flow", "quarterly_cashflow"),
+            ]:
+                st.subheader(title)
+                result = getattr(company, attr)
+                if result is not None and not result.empty:
+                    st.dataframe(result.T.head(8), use_container_width=True)
+                else:
+                    st.info(f"{title} unavailable.")
+            st.caption("Source: Yahoo Finance. Quarterly data may be incomplete or delayed.")
+        except Exception as exc:
+            st.error(f"Quarterly data error: {exc}")
+
+# =========================================================
+# PAGE: HISTORICAL DATA
+# =========================================================
+elif page == "Historical Data":
+    st.subheader("📥 Download Historical Stock Data")
+    symbol = st.text_input(
+        "Enter NSE stock symbol",
+        value="RELIANCE",
+        key="historical_symbol",
+    ).strip().upper()
+    period = st.selectbox(
+        "Select historical period",
+        ["1y", "2y", "5y", "10y"],
+        index=2,
+        key="historical_period",
+    )
+    if st.button("GET HISTORICAL DATA", type="primary"):
+        try:
+            ticker, hist = download_history(symbol, period)
+            hist = hist.reset_index()
+            st.success(f"Downloaded {len(hist)} daily records for {ticker}.")
+            st.dataframe(hist.tail(30), use_container_width=True, hide_index=True)
+            st.download_button(
+                "📥 Download Historical Data CSV",
+                data=hist.to_csv(index=False).encode("utf-8"),
+                file_name=f"{symbol}_{period}_history.csv",
+                mime="text/csv",
+            )
+        except Exception as exc:
+            st.error(f"Historical data error: {exc}")
+    st.caption("Source: Yahoo Finance. Historical data availability and accuracy may vary.")
+
+# =========================================================
+# PAGE: PRICE ALERTS
+# =========================================================
+elif page == "Price Alerts":
+    st.subheader("🔔 Stock Price Alert Check")
+    st.caption(
+        "This page checks the latest available daily closing price when you press the button. "
+        "It does not monitor prices continuously or send background notifications."
+    )
+    symbol = st.text_input(
+        "NSE Stock Symbol",
+        value="RELIANCE",
+        key="alert_symbol",
+    ).strip().upper()
+    target = st.number_input(
+        "Target Price (₹)",
+        min_value=0.0,
+        value=1600.0,
+        step=10.0,
+        key="alert_target",
+    )
+    stoploss = st.number_input(
+        "Stop Loss Price (₹)",
+        min_value=0.0,
+        value=1300.0,
+        step=10.0,
+        key="alert_stoploss",
+    )
+    if st.button("CHECK PRICE LEVEL", type="primary"):
+        try:
+            _, alert_data = download_history(symbol, "5d")
+            current = float(alert_data["Close"].dropna().iloc[-1])
+            st.metric("Latest Available Closing Price", f"₹{current:,.2f}")
+            if target > 0 and current >= target:
+                st.success("🎯 Target price reached.")
+            if stoploss > 0 and current <= stoploss:
+                st.error("⚠️ Stop-loss level reached.")
+            if target > 0 and stoploss > 0 and stoploss < current < target:
+                st.info("Price is between your target and stop-loss levels.")
+            st.caption(
+                "Manual price check using the latest available daily data. "
+                "Not a continuous live alert. Verify prices with your broker."
+            )
+        except Exception as exc:
+            st.error(f"Price alert error: {exc}")
+
+st.divider()
+st.caption(
+    "Indian Stock AI | Personal research prototype | "
+    "Not investment advice. Always verify data independently."
+)
